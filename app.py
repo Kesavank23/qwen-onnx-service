@@ -26,14 +26,14 @@ def ensure_model_exists():
     if not os.path.exists(ONNX_MODEL_PATH):
         logger.info("[INIT] Downloading model_q4.onnx from Hugging Face...")
         hf_hub_download(
-            repo_id="Qwen/Qwen2.5-0.5B-Instruct-ONNX",
+            repo_id="onnx-community/Qwen2.5-0.5B-Instruct",
             filename="onnx/model_q4.onnx",
             local_dir=MODEL_DIR
         )
     if not os.path.exists(TOKENIZER_PATH):
         logger.info("[INIT] Downloading tokenizer.json from Hugging Face...")
         hf_hub_download(
-            repo_id="Qwen/Qwen2.5-0.5B-Instruct-ONNX",
+            repo_id="onnx-community/Qwen2.5-0.5B-Instruct",
             filename="tokenizer.json",
             local_dir=MODEL_DIR
         )
