@@ -43,9 +43,18 @@ def ensure_model_exists():
 def load_model():
     global session, tokenizer
     ensure_model_exists()
-    logger.info("[STARTUP] Initializing ONNX Runtime InferenceSession...")
+    logger.info("[STARTUP] Initializing Memory-Optimized ONNX Runtime InferenceSession...")
     t0 = time.time()
-    session = ort.InferenceSession(ONNX_MODEL_PATH, providers=["CPUExecutionProvider"])
+    
+    # Session options to prevent RAM spikes and OOM crashes in constrained environments (Railway)
+    so = ort.SessionOptions()
+    so.intra_op_num_threads = 1
+    so.inter_op_num_threads = 1
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    so.enable_cpu_mem_arena = False  # Return unused tensor memory directly to OS
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+    
+    session = ort.InferenceSession(ONNX_MODEL_PATH, sess_options=so, providers=["CPUExecutionProvider"])
     tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
     logger.info(f"[STARTUP] Model and tokenizer loaded successfully in {time.time() - t0:.2f}s.")
 
@@ -141,6 +150,11 @@ def generate(req: GenerateRequest):
         for l in range(num_layers):
             feed[f"past_key_values.{l}.key"] = out[1 + 2 * l]
             feed[f"past_key_values.{l}.value"] = out[2 + 2 * l]
+
+    del feed
+    del out
+    import gc
+    gc.collect()
 
     output_text = tokenizer.decode(generated_tokens)
     dur = time.time() - t0
