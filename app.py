@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 import numpy as np
 import onnxruntime as ort
 from tokenizers import Tokenizer
@@ -20,9 +21,11 @@ TOKENIZER_PATH = os.path.join(MODEL_DIR, "tokenizer.json")
 
 session = None
 tokenizer = None
+model_lock = threading.Lock()
+is_loading = False
 
-def ensure_model_exists():
-    """Download model if not present."""
+def ensure_model_files():
+    """Ensure ONNX and tokenizer exist before loading."""
     os.makedirs(os.path.join(MODEL_DIR, "onnx"), exist_ok=True)
     if not os.path.exists(ONNX_MODEL_PATH):
         logger.info("[INIT] Downloading model_q4.onnx from Hugging Face...")
@@ -39,24 +42,42 @@ def ensure_model_exists():
             local_dir=MODEL_DIR
         )
 
+def get_session_and_tokenizer():
+    global session, tokenizer, is_loading
+    if session is not None and tokenizer is not None:
+        return session, tokenizer
+
+    with model_lock:
+        if session is not None and tokenizer is not None:
+            return session, tokenizer
+
+        is_loading = True
+        ensure_model_files()
+        logger.info("[STARTUP] Initializing Ultra-Low Memory ONNX Runtime InferenceSession...")
+        t0 = time.time()
+
+        # Session options designed strictly for 1GB RAM budget:
+        # - Single thread to prevent multi-core buffer duplication
+        # - Sequential execution
+        # - Disable CPU memory arena pool
+        # - Disable graph optimizations (ORT_DISABLE_ALL) to avoid peak RAM allocation during graph rewrites
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = 1
+        so.inter_op_num_threads = 1
+        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        so.enable_cpu_mem_arena = False
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+
+        session = ort.InferenceSession(ONNX_MODEL_PATH, sess_options=so, providers=["CPUExecutionProvider"])
+        tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
+        is_loading = False
+        logger.info(f"[STARTUP] Model and tokenizer loaded successfully in {time.time() - t0:.2f}s.")
+        return session, tokenizer
+
 @app.on_event("startup")
-def load_model():
-    global session, tokenizer
-    ensure_model_exists()
-    logger.info("[STARTUP] Initializing Memory-Optimized ONNX Runtime InferenceSession...")
-    t0 = time.time()
-    
-    # Session options to prevent RAM spikes and OOM crashes in constrained environments (Railway)
-    so = ort.SessionOptions()
-    so.intra_op_num_threads = 1
-    so.inter_op_num_threads = 1
-    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    so.enable_cpu_mem_arena = False  # Return unused tensor memory directly to OS
-    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-    
-    session = ort.InferenceSession(ONNX_MODEL_PATH, sess_options=so, providers=["CPUExecutionProvider"])
-    tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
-    logger.info(f"[STARTUP] Model and tokenizer loaded successfully in {time.time() - t0:.2f}s.")
+def startup_event():
+    # Start loading in background thread so HTTP server starts instantly and passes Railway health check
+    threading.Thread(target=get_session_and_tokenizer, daemon=True).start()
 
 class GenerateRequest(BaseModel):
     prompt: str
@@ -72,19 +93,24 @@ class GenerateResponse(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "qwen2.5-0.5b-onnx"}
+    return {
+        "status": "ok",
+        "service": "qwen2.5-0.5b-onnx",
+        "model_loaded": session is not None
+    }
 
 @app.get("/health")
 def health_check():
+    # Return 200 immediately so container is marked healthy by Railway
     return {
-        "status": "healthy" if session is not None else "initializing",
-        "model": "Qwen2.5-0.5B-Instruct-ONNX"
+        "status": "healthy",
+        "model_ready": session is not None,
+        "is_loading": is_loading
     }
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
-    if session is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model session is not ready yet.")
+    sess, tok = get_session_and_tokenizer()
 
     t0 = time.time()
     system_msg = req.system_prompt or (
@@ -99,13 +125,13 @@ def generate(req: GenerateRequest):
         f"<|im_start|>assistant\n"
     )
 
-    enc = tokenizer.encode(chat_prompt)
+    enc = tok.encode(chat_prompt)
     input_ids = np.array([enc.ids], dtype=np.int64)
     seq_len = input_ids.shape[1]
     attn_mask = np.ones((1, seq_len), dtype=np.int64)
     pos_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
-    num_layers = 24  # 48 past_key_values inputs = 24 layers * (key, value)
+    num_layers = 24
     feed = {
         "input_ids": input_ids,
         "attention_mask": attn_mask,
@@ -116,14 +142,13 @@ def generate(req: GenerateRequest):
         feed[f"past_key_values.{l}.value"] = np.zeros((1, 2, 0, 64), dtype=np.float32)
 
     generated_tokens = []
-    eos_token_ids = {151643, 151645}  # <|endoftext|>, <|im_end|>
+    eos_token_ids = {151643, 151645}
     token_counter = Counter()
 
     for step in range(req.max_new_tokens):
-        out = session.run(None, feed)
+        out = sess.run(None, feed)
         logits = out[0][0, -1, :].copy()
 
-        # Repetition penalty
         if req.repetition_penalty != 1.0 and len(token_counter) > 0:
             for tid, count in token_counter.items():
                 if logits[tid] > 0:
@@ -156,7 +181,7 @@ def generate(req: GenerateRequest):
     import gc
     gc.collect()
 
-    output_text = tokenizer.decode(generated_tokens)
+    output_text = tok.decode(generated_tokens)
     dur = time.time() - t0
 
     return GenerateResponse(
