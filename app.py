@@ -7,6 +7,7 @@ from tokenizers import Tokenizer
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from huggingface_hub import hf_hub_download
+from collections import Counter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("qwen-onnx-service")
@@ -60,6 +61,10 @@ class GenerateResponse(BaseModel):
     tokens_generated: int
     duration_seconds: float
 
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "qwen2.5-0.5b-onnx"}
+
 @app.get("/health")
 def health_check():
     return {
@@ -89,43 +94,60 @@ def generate(req: GenerateRequest):
     input_ids = np.array([enc.ids], dtype=np.int64)
     seq_len = input_ids.shape[1]
     attn_mask = np.ones((1, seq_len), dtype=np.int64)
+    pos_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
-    generated_token_ids = []
-    curr_ids = input_ids
-    curr_mask = attn_mask
+    num_layers = 24  # 48 past_key_values inputs = 24 layers * (key, value)
+    feed = {
+        "input_ids": input_ids,
+        "attention_mask": attn_mask,
+        "position_ids": pos_ids,
+    }
+    for l in range(num_layers):
+        feed[f"past_key_values.{l}.key"] = np.zeros((1, 2, 0, 64), dtype=np.float32)
+        feed[f"past_key_values.{l}.value"] = np.zeros((1, 2, 0, 64), dtype=np.float32)
 
-    for _ in range(req.max_new_tokens):
-        ort_inputs = {
-            "input_ids": curr_ids,
-            "attention_mask": curr_mask
-        }
-        outputs = session.run(None, ort_inputs)
-        logits = outputs[0][:, -1, :]
+    generated_tokens = []
+    eos_token_ids = {151643, 151645}  # <|endoftext|>, <|im_end|>
+    token_counter = Counter()
+
+    for step in range(req.max_new_tokens):
+        out = session.run(None, feed)
+        logits = out[0][0, -1, :].copy()
 
         # Repetition penalty
-        for token_id in set(generated_token_ids):
-            if logits[0, token_id] > 0:
-                logits[0, token_id] /= req.repetition_penalty
-            else:
-                logits[0, token_id] *= req.repetition_penalty
+        if req.repetition_penalty != 1.0 and len(token_counter) > 0:
+            for tid, count in token_counter.items():
+                if logits[tid] > 0:
+                    logits[tid] /= (req.repetition_penalty ** count)
+                else:
+                    logits[tid] *= (req.repetition_penalty ** count)
 
-        next_token_id = int(np.argmax(logits, axis=-1)[0])
-
-        # Stop tokens: <|im_end|> is 151645, <|endoftext|> is 151643
-        if next_token_id in {151645, 151643}:
+        next_token = int(np.argmax(logits))
+        if next_token in eos_token_ids:
             break
 
-        generated_token_ids.append(next_token_id)
-        next_id_arr = np.array([[next_token_id]], dtype=np.int64)
-        curr_ids = np.concatenate([curr_ids, next_id_arr], axis=1)
-        curr_mask = np.ones((1, curr_ids.shape[1]), dtype=np.int64)
+        generated_tokens.append(next_token)
+        token_counter[next_token] += 1
 
-    output_text = tokenizer.decode(generated_token_ids)
+        cur_seq_len = attn_mask.shape[1]
+        attn_mask = np.ones((1, cur_seq_len + 1), dtype=np.int64)
+        pos_ids = np.array([[cur_seq_len]], dtype=np.int64)
+
+        feed = {
+            "input_ids": np.array([[next_token]], dtype=np.int64),
+            "attention_mask": attn_mask,
+            "position_ids": pos_ids,
+        }
+        for l in range(num_layers):
+            feed[f"past_key_values.{l}.key"] = out[1 + 2 * l]
+            feed[f"past_key_values.{l}.value"] = out[2 + 2 * l]
+
+    output_text = tokenizer.decode(generated_tokens)
     dur = time.time() - t0
 
     return GenerateResponse(
         generated_text=output_text.strip(),
-        tokens_generated=len(generated_token_ids),
+        tokens_generated=len(generated_tokens),
         duration_seconds=round(dur, 2)
     )
 
