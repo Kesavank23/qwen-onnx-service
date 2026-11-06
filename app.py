@@ -11,11 +11,11 @@ from huggingface_hub import hf_hub_download
 from collections import Counter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("qwen-onnx-service")
+logger = logging.getLogger("smollm2-onnx-service")
 
-app = FastAPI(title="Qwen2.5-0.5B ONNX Model Service", version="1.0.0")
+app = FastAPI(title="SmolLM2-135M ONNX Model Service", version="1.0.0")
 
-MODEL_DIR = os.getenv("MODEL_DIR", "/app/models/qwen2.5-0.5b")
+MODEL_DIR = os.getenv("MODEL_DIR", "/app/models/smollm2-135m")
 ONNX_MODEL_PATH = os.path.join(MODEL_DIR, "onnx", "model_q4.onnx")
 TOKENIZER_PATH = os.path.join(MODEL_DIR, "tokenizer.json")
 
@@ -24,20 +24,25 @@ tokenizer = None
 model_lock = threading.Lock()
 is_loading = False
 
+# SmolLM2-135M dimensions: 30 layers, 3 KV heads, head_dim 64
+NUM_LAYERS = 30
+NUM_KV_HEADS = 3
+HEAD_DIM = 64
+
 def ensure_model_files():
     """Ensure ONNX and tokenizer exist before loading."""
     os.makedirs(os.path.join(MODEL_DIR, "onnx"), exist_ok=True)
     if not os.path.exists(ONNX_MODEL_PATH):
         logger.info("[INIT] Downloading model_q4.onnx from Hugging Face...")
         hf_hub_download(
-            repo_id="onnx-community/Qwen2.5-0.5B-Instruct",
+            repo_id="onnx-community/SmolLM2-135M-Instruct-ONNX",
             filename="onnx/model_q4.onnx",
             local_dir=MODEL_DIR
         )
     if not os.path.exists(TOKENIZER_PATH):
         logger.info("[INIT] Downloading tokenizer.json from Hugging Face...")
         hf_hub_download(
-            repo_id="onnx-community/Qwen2.5-0.5B-Instruct",
+            repo_id="onnx-community/SmolLM2-135M-Instruct-ONNX",
             filename="tokenizer.json",
             local_dir=MODEL_DIR
         )
@@ -53,14 +58,9 @@ def get_session_and_tokenizer():
 
         is_loading = True
         ensure_model_files()
-        logger.info("[STARTUP] Initializing Ultra-Low Memory ONNX Runtime InferenceSession...")
+        logger.info("[STARTUP] Initializing SmolLM2-135M Ultra-Low Memory ONNX Runtime Session...")
         t0 = time.time()
 
-        # Session options designed strictly for 1GB RAM budget:
-        # - Single thread to prevent multi-core buffer duplication
-        # - Sequential execution
-        # - Disable CPU memory arena pool
-        # - Disable graph optimizations (ORT_DISABLE_ALL) to avoid peak RAM allocation during graph rewrites
         so = ort.SessionOptions()
         so.intra_op_num_threads = 1
         so.inter_op_num_threads = 1
@@ -76,7 +76,6 @@ def get_session_and_tokenizer():
 
 @app.on_event("startup")
 def startup_event():
-    # Start loading in background thread so HTTP server starts instantly and passes Railway health check
     threading.Thread(target=get_session_and_tokenizer, daemon=True).start()
 
 class GenerateRequest(BaseModel):
@@ -95,13 +94,12 @@ class GenerateResponse(BaseModel):
 def root():
     return {
         "status": "ok",
-        "service": "qwen2.5-0.5b-onnx",
+        "service": "smollm2-135m-onnx",
         "model_loaded": session is not None
     }
 
 @app.get("/health")
 def health_check():
-    # Return 200 immediately so container is marked healthy by Railway
     return {
         "status": "healthy",
         "model_ready": session is not None,
@@ -131,18 +129,19 @@ def generate(req: GenerateRequest):
     attn_mask = np.ones((1, seq_len), dtype=np.int64)
     pos_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
 
-    num_layers = 24
+    # SmolLM2: 30 layers with past_key_values shape: (batch_size, num_kv_heads, seq_len, head_dim)
     feed = {
         "input_ids": input_ids,
         "attention_mask": attn_mask,
         "position_ids": pos_ids,
     }
-    for l in range(num_layers):
-        feed[f"past_key_values.{l}.key"] = np.zeros((1, 2, 0, 64), dtype=np.float32)
-        feed[f"past_key_values.{l}.value"] = np.zeros((1, 2, 0, 64), dtype=np.float32)
+    for l in range(NUM_LAYERS):
+        feed[f"past_key_values.{l}.key"] = np.zeros((1, NUM_KV_HEADS, 0, HEAD_DIM), dtype=np.float32)
+        feed[f"past_key_values.{l}.value"] = np.zeros((1, NUM_KV_HEADS, 0, HEAD_DIM), dtype=np.float32)
 
     generated_tokens = []
-    eos_token_ids = {151643, 151645}
+    # Stop tokens: <|im_end|> (0) or <|endoftext|> (2)
+    eos_token_ids = {0, 2}
     token_counter = Counter()
 
     for step in range(req.max_new_tokens):
@@ -172,7 +171,7 @@ def generate(req: GenerateRequest):
             "attention_mask": attn_mask,
             "position_ids": pos_ids,
         }
-        for l in range(num_layers):
+        for l in range(NUM_LAYERS):
             feed[f"past_key_values.{l}.key"] = out[1 + 2 * l]
             feed[f"past_key_values.{l}.value"] = out[2 + 2 * l]
 

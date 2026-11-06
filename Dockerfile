@@ -9,13 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download model from public onnx-community repository during image build
-RUN mkdir -p /app/models/qwen2.5-0.5b/onnx && \
+# Download SmolLM2-135M-Instruct ONNX (180MB model, runs cleanly under 350MB RAM)
+RUN mkdir -p /app/models/smollm2-135m/onnx && \
     python3 -c "\
 from huggingface_hub import hf_hub_download; \
-hf_hub_download(repo_id='onnx-community/Qwen2.5-0.5B-Instruct', filename='onnx/model_q4.onnx', local_dir='/app/models/qwen2.5-0.5b'); \
-hf_hub_download(repo_id='onnx-community/Qwen2.5-0.5B-Instruct', filename='tokenizer.json', local_dir='/app/models/qwen2.5-0.5b'); \
-hf_hub_download(repo_id='onnx-community/Qwen2.5-0.5B-Instruct', filename='config.json', local_dir='/app/models/qwen2.5-0.5b')"
+hf_hub_download(repo_id='onnx-community/SmolLM2-135M-Instruct-ONNX', filename='onnx/model_q4.onnx', local_dir='/app/models/smollm2-135m'); \
+hf_hub_download(repo_id='onnx-community/SmolLM2-135M-Instruct-ONNX', filename='tokenizer.json', local_dir='/app/models/smollm2-135m'); \
+hf_hub_download(repo_id='onnx-community/SmolLM2-135M-Instruct-ONNX', filename='config.json', local_dir='/app/models/smollm2-135m')"
 
 COPY app.py ./
 
