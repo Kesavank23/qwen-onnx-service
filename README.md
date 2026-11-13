@@ -1,6 +1,13 @@
-# Qwen2.5-Coder-0.5B GGUF Model Microservice
+# SmolLM2-135M-Instruct GGUF Model Microservice
 
-Lightweight CPU-accelerated GGUF microservice for generating and refining DBML schemas. Optimized for Railway container deployment.
+Ultra-lightweight CPU-accelerated GGUF microservice for generating and refining DBML schemas. Optimized for Railway free tier container deployment (<250MB RAM).
+
+## Model Specifications
+- **Model**: `SmolLM2-135M-Instruct`
+- **Format**: GGUF (`Q4_K_M`)
+- **Size on disk**: ~105 MB
+- **RAM usage**: ~180 MB – 220 MB
+- **Engine**: `llama-cpp-python` (C++ AVX2 optimized)
 
 ## Endpoints
 

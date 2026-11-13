@@ -6,23 +6,23 @@ from pydantic import BaseModel
 from llama_cpp import Llama
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("qwen-coder-gguf-service")
+logger = logging.getLogger("smollm2-135m-gguf-service")
 
-app = FastAPI(title="Qwen2.5-Coder-0.5B GGUF Model Service", version="1.0.0")
+app = FastAPI(title="SmolLM2-135M GGUF Model Service", version="1.0.0")
 
-MODEL_PATH = os.getenv("MODEL_PATH", "/app/models/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf")
+MODEL_PATH = os.getenv("MODEL_PATH", "/app/models/SmolLM2-135M-Instruct-Q4_K_M.gguf")
 
 llm = None
 
 def get_llm():
     global llm
     if llm is None:
-        logger.info(f"[STARTUP] Loading GGUF model from {MODEL_PATH}...")
+        logger.info(f"[STARTUP] Loading SmolLM2-135M GGUF model from {MODEL_PATH}...")
         t0 = time.time()
         if not os.path.exists(MODEL_PATH):
             raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
         
-        # Optimized for low-memory Railway container (n_ctx=2048, single thread/CPU mode)
+        # Ultra-low memory configuration: 135M model with 2048 context takes only ~150MB RAM!
         llm = Llama(
             model_path=MODEL_PATH,
             n_ctx=2048,
@@ -30,7 +30,7 @@ def get_llm():
             n_batch=512,
             verbose=False
         )
-        logger.info(f"[STARTUP] GGUF model loaded in {time.time() - t0:.2f}s.")
+        logger.info(f"[STARTUP] SmolLM2-135M GGUF model loaded in {time.time() - t0:.2f}s.")
     return llm
 
 @app.on_event("startup")
@@ -56,7 +56,7 @@ class GenerateResponse(BaseModel):
 def root():
     return {
         "status": "ok",
-        "service": "qwen2.5-coder-0.5b-gguf",
+        "service": "smollm2-135m-gguf",
         "model_loaded": llm is not None
     }
 

@@ -19,16 +19,16 @@ RUN pip install --no-cache-dir \
     pydantic>=2.0.0 \
     huggingface-hub>=0.20.0
 
-# Download Qwen2.5-Coder-0.5B-Instruct-Q4_K_M.gguf (compact ~390MB, low RAM footprint)
+# Download SmolLM2-135M-Instruct-Q4_K_M.gguf (ultra-lightweight ~105MB, uses only ~180MB RAM)
 RUN mkdir -p /app/models && \
     python3 -c "\
 from huggingface_hub import hf_hub_download; \
-hf_hub_download(repo_id='Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF', filename='qwen2.5-coder-0.5b-instruct-q4_k_m.gguf', local_dir='/app/models')"
+hf_hub_download(repo_id='bartowski/SmolLM2-135M-Instruct-GGUF', filename='SmolLM2-135M-Instruct-Q4_K_M.gguf', local_dir='/app/models')"
 
 COPY app.py ./
 
 ENV PORT=8000
-ENV MODEL_PATH=/app/models/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf
+ENV MODEL_PATH=/app/models/SmolLM2-135M-Instruct-Q4_K_M.gguf
 ENV N_THREADS=2
 
 EXPOSE 8000
