@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt ./
 
-# Install pre-built CPU wheel for llama-cpp-python to keep Docker build lightning fast on Railway
 RUN pip install --no-cache-dir \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
     llama-cpp-python>=0.3.0 \
@@ -19,18 +18,19 @@ RUN pip install --no-cache-dir \
     pydantic>=2.0.0 \
     huggingface-hub>=0.20.0
 
-# Download SmolLM2-135M-Instruct-Q4_K_M.gguf (ultra-lightweight ~105MB, uses only ~180MB RAM)
+# Download Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf (~1.1GB, supports up to 32k context)
 RUN mkdir -p /app/models && \
     python3 -c "\
 from huggingface_hub import hf_hub_download; \
-hf_hub_download(repo_id='bartowski/SmolLM2-135M-Instruct-GGUF', filename='SmolLM2-135M-Instruct-Q4_K_M.gguf', local_dir='/app/models')"
+hf_hub_download(repo_id='Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF', filename='qwen2.5-coder-1.5b-instruct-q4_k_m.gguf', local_dir='/app/models')"
 
 COPY app.py ./
 
-ENV PORT=8000
-ENV MODEL_PATH=/app/models/SmolLM2-135M-Instruct-Q4_K_M.gguf
-ENV N_THREADS=2
+ENV PORT=8006
+ENV MODEL_PATH=/app/models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
+ENV N_THREADS=4
+ENV N_CTX=8192
 
-EXPOSE 8000
+EXPOSE 8006
 
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8006}"]
