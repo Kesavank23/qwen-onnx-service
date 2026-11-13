@@ -1,89 +1,51 @@
 import os
 import time
 import logging
-import threading
-import numpy as np
-import onnxruntime as ort
-from tokenizers import Tokenizer
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from huggingface_hub import hf_hub_download
-from collections import Counter
+from llama_cpp import Llama
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("smollm2-onnx-service")
+logger = logging.getLogger("qwen-coder-gguf-service")
 
-app = FastAPI(title="SmolLM2-135M ONNX Model Service", version="1.0.0")
+app = FastAPI(title="Qwen2.5-Coder-0.5B GGUF Model Service", version="1.0.0")
 
-MODEL_DIR = os.getenv("MODEL_DIR", "/app/models/smollm2-135m")
-ONNX_MODEL_PATH = os.path.join(MODEL_DIR, "onnx", "model_q4.onnx")
-TOKENIZER_PATH = os.path.join(MODEL_DIR, "tokenizer.json")
+MODEL_PATH = os.getenv("MODEL_PATH", "/app/models/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf")
 
-session = None
-tokenizer = None
-model_lock = threading.Lock()
-is_loading = False
+llm = None
 
-# SmolLM2-135M dimensions: 30 layers, 3 KV heads, head_dim 64
-NUM_LAYERS = 30
-NUM_KV_HEADS = 3
-HEAD_DIM = 64
-
-def ensure_model_files():
-    """Ensure ONNX and tokenizer exist before loading."""
-    os.makedirs(os.path.join(MODEL_DIR, "onnx"), exist_ok=True)
-    if not os.path.exists(ONNX_MODEL_PATH):
-        logger.info("[INIT] Downloading model_q4.onnx from Hugging Face...")
-        hf_hub_download(
-            repo_id="onnx-community/SmolLM2-135M-Instruct-ONNX",
-            filename="onnx/model_q4.onnx",
-            local_dir=MODEL_DIR
-        )
-    if not os.path.exists(TOKENIZER_PATH):
-        logger.info("[INIT] Downloading tokenizer.json from Hugging Face...")
-        hf_hub_download(
-            repo_id="onnx-community/SmolLM2-135M-Instruct-ONNX",
-            filename="tokenizer.json",
-            local_dir=MODEL_DIR
-        )
-
-def get_session_and_tokenizer():
-    global session, tokenizer, is_loading
-    if session is not None and tokenizer is not None:
-        return session, tokenizer
-
-    with model_lock:
-        if session is not None and tokenizer is not None:
-            return session, tokenizer
-
-        is_loading = True
-        ensure_model_files()
-        logger.info("[STARTUP] Initializing SmolLM2-135M Ultra-Low Memory ONNX Runtime Session...")
+def get_llm():
+    global llm
+    if llm is None:
+        logger.info(f"[STARTUP] Loading GGUF model from {MODEL_PATH}...")
         t0 = time.time()
-
-        so = ort.SessionOptions()
-        so.intra_op_num_threads = 1
-        so.inter_op_num_threads = 1
-        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        so.enable_cpu_mem_arena = False
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-
-        session = ort.InferenceSession(ONNX_MODEL_PATH, sess_options=so, providers=["CPUExecutionProvider"])
-        tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
-        is_loading = False
-        logger.info(f"[STARTUP] Model and tokenizer loaded successfully in {time.time() - t0:.2f}s.")
-        return session, tokenizer
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
+        
+        # Optimized for low-memory Railway container (n_ctx=2048, single thread/CPU mode)
+        llm = Llama(
+            model_path=MODEL_PATH,
+            n_ctx=2048,
+            n_threads=int(os.getenv("N_THREADS", "2")),
+            n_batch=512,
+            verbose=False
+        )
+        logger.info(f"[STARTUP] GGUF model loaded in {time.time() - t0:.2f}s.")
+    return llm
 
 @app.on_event("startup")
 def startup_event():
-    threading.Thread(target=get_session_and_tokenizer, daemon=True).start()
+    try:
+        get_llm()
+    except Exception as e:
+        logger.error(f"[STARTUP ERROR] Could not preload model: {e}")
 
 class GenerateRequest(BaseModel):
     prompt: str
     system_prompt: str | None = None
     max_new_tokens: int = 512
-    temperature: float = 0.7
-    repetition_penalty: float = 1.2
+    temperature: float = 0.2
+    repetition_penalty: float = 1.1
 
 class GenerateResponse(BaseModel):
     generated_text: str
@@ -94,100 +56,53 @@ class GenerateResponse(BaseModel):
 def root():
     return {
         "status": "ok",
-        "service": "smollm2-135m-onnx",
-        "model_loaded": session is not None
+        "service": "qwen2.5-coder-0.5b-gguf",
+        "model_loaded": llm is not None
     }
 
 @app.get("/health")
 def health_check():
     return {
         "status": "healthy",
-        "model_ready": session is not None,
-        "is_loading": is_loading
+        "model_ready": llm is not None
     }
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
-    sess, tok = get_session_and_tokenizer()
-
+    model = get_llm()
     t0 = time.time()
+
     system_msg = req.system_prompt or (
         "You are an expert database engineer. Convert the given database tables into clean, valid DBML format "
         "strictly adhering to dbdiagram.io syntax. Mark primary keys as [pk] and place all foreign key references "
         "as 'Ref: table1.col > table2.col' under a '// Relationships' section at the end. Output only raw DBML code."
     )
 
-    chat_prompt = (
-        f"<|im_start|>system\n{system_msg}<|im_end|>\n"
-        f"<|im_start|>user\n{req.prompt}<|im_end|>\n"
-        f"<|im_start|>assistant\n"
-    )
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": req.prompt}
+    ]
 
-    enc = tok.encode(chat_prompt)
-    input_ids = np.array([enc.ids], dtype=np.int64)
-    seq_len = input_ids.shape[1]
-    attn_mask = np.ones((1, seq_len), dtype=np.int64)
-    pos_ids = np.arange(seq_len, dtype=np.int64).reshape(1, -1)
+    try:
+        response = model.create_chat_completion(
+            messages=messages,
+            max_tokens=req.max_new_tokens,
+            temperature=req.temperature,
+            repeat_penalty=req.repetition_penalty
+        )
 
-    # SmolLM2: 30 layers with past_key_values shape: (batch_size, num_kv_heads, seq_len, head_dim)
-    feed = {
-        "input_ids": input_ids,
-        "attention_mask": attn_mask,
-        "position_ids": pos_ids,
-    }
-    for l in range(NUM_LAYERS):
-        feed[f"past_key_values.{l}.key"] = np.zeros((1, NUM_KV_HEADS, 0, HEAD_DIM), dtype=np.float32)
-        feed[f"past_key_values.{l}.value"] = np.zeros((1, NUM_KV_HEADS, 0, HEAD_DIM), dtype=np.float32)
+        output_text = response["choices"][0]["message"]["content"] or ""
+        tokens_gen = response.get("usage", {}).get("completion_tokens", len(output_text.split()))
+        dur = time.time() - t0
 
-    generated_tokens = []
-    # Stop tokens: <|im_end|> (0) or <|endoftext|> (2)
-    eos_token_ids = {0, 2}
-    token_counter = Counter()
-
-    for step in range(req.max_new_tokens):
-        out = sess.run(None, feed)
-        logits = out[0][0, -1, :].copy()
-
-        if req.repetition_penalty != 1.0 and len(token_counter) > 0:
-            for tid, count in token_counter.items():
-                if logits[tid] > 0:
-                    logits[tid] /= (req.repetition_penalty ** count)
-                else:
-                    logits[tid] *= (req.repetition_penalty ** count)
-
-        next_token = int(np.argmax(logits))
-        if next_token in eos_token_ids:
-            break
-
-        generated_tokens.append(next_token)
-        token_counter[next_token] += 1
-
-        cur_seq_len = attn_mask.shape[1]
-        attn_mask = np.ones((1, cur_seq_len + 1), dtype=np.int64)
-        pos_ids = np.array([[cur_seq_len]], dtype=np.int64)
-
-        feed = {
-            "input_ids": np.array([[next_token]], dtype=np.int64),
-            "attention_mask": attn_mask,
-            "position_ids": pos_ids,
-        }
-        for l in range(NUM_LAYERS):
-            feed[f"past_key_values.{l}.key"] = out[1 + 2 * l]
-            feed[f"past_key_values.{l}.value"] = out[2 + 2 * l]
-
-    del feed
-    del out
-    import gc
-    gc.collect()
-
-    output_text = tok.decode(generated_tokens)
-    dur = time.time() - t0
-
-    return GenerateResponse(
-        generated_text=output_text.strip(),
-        tokens_generated=len(generated_tokens),
-        duration_seconds=round(dur, 2)
-    )
+        return GenerateResponse(
+            generated_text=output_text.strip(),
+            tokens_generated=tokens_gen,
+            duration_seconds=round(dur, 2)
+        )
+    except Exception as e:
+        logger.error(f"Generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
