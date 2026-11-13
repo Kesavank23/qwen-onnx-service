@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 from fastapi import FastAPI, HTTPException
@@ -22,7 +23,6 @@ def get_llm():
         if not os.path.exists(MODEL_PATH):
             raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
         
-        # Ultra-low memory configuration: 135M model with 2048 context takes only ~150MB RAM!
         llm = Llama(
             model_path=MODEL_PATH,
             n_ctx=2048,
@@ -52,6 +52,37 @@ class GenerateResponse(BaseModel):
     tokens_generated: int
     duration_seconds: float
 
+def parse_sql_or_dbml(text: str) -> str:
+    # If already pure DBML Table syntax
+    if "Table " in text:
+        start = text.find("Table ")
+        extracted = text[start:].strip()
+        if "```" in extracted:
+            extracted = extracted.split("```")[0].strip()
+        return extracted
+    
+    # If output was SQL CREATE TABLE
+    m = re.search(r'CREATE\s+TABLE\s+(\w+)\s*\((.*?)\);?', text, re.DOTALL | re.IGNORECASE)
+    if m:
+        table_name = m.group(1)
+        body = m.group(2)
+        cols = []
+        for line in body.split('\n'):
+            line = line.strip().rstrip(',')
+            if not line or line.upper().startswith(('FOREIGN KEY', 'PRIMARY KEY (', 'CONSTRAINT')):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                col_name = parts[0]
+                raw_type = parts[1].lower()
+                col_type = 'int' if 'int' in raw_type else ('date' if 'date' in raw_type else 'varchar')
+                pk = ' [pk]' if 'primary key' in line.lower() else ''
+                cols.append(f"  {col_name} {col_type}{pk}")
+        if not cols:
+            cols.append("  id int [pk]")
+        return f"Table {table_name} {{\n" + "\n".join(cols) + "\n}"
+    return ""
+
 @app.get("/")
 def root():
     return {
@@ -72,12 +103,7 @@ def generate(req: GenerateRequest):
     model = get_llm()
     t0 = time.time()
 
-    system_msg = req.system_prompt or (
-        "You are an expert database engineer. Convert the given database tables into clean, valid DBML format "
-        "strictly adhering to dbdiagram.io syntax. Mark primary keys as [pk] and place all foreign key references "
-        "as 'Ref: table1.col > table2.col' under a '// Relationships' section at the end. Output only raw DBML code."
-    )
-
+    system_msg = req.system_prompt or "You are an expert database assistant."
     messages = [
         {"role": "system", "content": system_msg},
         {"role": "user", "content": req.prompt}
